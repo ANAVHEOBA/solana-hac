@@ -6,10 +6,43 @@ import { WebSocketHandlers } from './infrastructure/websocket/wsHandlers';
 import accountRoutes from './routes/accountRoutes';
 import { createServer } from 'http';
 import WebSocket from 'ws';
+import { ProtocolService } from './services/protocolService';
+import { RiskMonitoringService } from './services/risk/riskMonitoringService';
+import { AlertService } from './services/alerts/alertService';
+import { NotificationManager } from './infrastructure/alerts/notificationManager';
+import { ClaudeService } from './ai/services/claudeService';
+import aiRoutes from './routes/aiRoutes';
+import dotenv from 'dotenv';
 const { Point } = require('@influxdata/influxdb-client');
+
+dotenv.config();
 
 const app = express();
 const server = createServer(app);
+
+// Initialize notification manager
+const notificationManager = new NotificationManager({
+    discord: {
+        webhookUrl: process.env.DISCORD_WEBHOOK_URL || ''
+    },
+    telegram: {
+        botToken: process.env.TELEGRAM_BOT_TOKEN || '',
+        chatId: process.env.TELEGRAM_CHAT_ID || ''
+    }
+});
+
+// Initialize services
+const alertService = new AlertService(notificationManager);
+const riskService = new RiskMonitoringService(alertService);
+const protocolService = new ProtocolService(riskService, alertService);
+
+// Initialize Claude service with API key check
+if (!process.env.ANTHROPIC_API_KEY) {
+    console.error('ANTHROPIC_API_KEY is not set in environment variables');
+    process.exit(1);
+}
+
+const claudeService = new ClaudeService(protocolService, riskService);
 
 // Initialize infrastructure
 async function initializeInfrastructure() {
@@ -94,10 +127,14 @@ app.get('/health', async (req, res) => {
             { status: 1 }
         );
 
+        // Test Claude connectivity
+        const claudeHealth = await claudeService.testConnection();
+
         res.json({
             status: 'healthy',
             redis: redisStatus === 'ok' ? 'connected' : 'error',
             influxdb: 'connected',
+            claude: claudeHealth ? 'connected' : 'error',
             timestamp: new Date().toISOString()
         });
     } catch (error) {
@@ -111,7 +148,10 @@ app.get('/health', async (req, res) => {
 
 // Initialize app
 app.use(express.json());
+
+// Mount routes with the /api/account prefix
 app.use('/api/account', accountRoutes);
+app.use('/api/ai', aiRoutes);
 
 // Start server
 const PORT = process.env.PORT || 3000;
@@ -125,6 +165,9 @@ server.listen(PORT, async () => {
         { event: 'start', port: PORT.toString() },
         { status: 1 }
     );
+
+    // Start protocol monitoring
+    monitorProtocols();
 });
 
 // Handle graceful shutdown
@@ -144,3 +187,71 @@ process.on('SIGTERM', async () => {
         process.exit(0);
     });
 });
+
+// Add new monitoring function for Kamino
+async function monitorProtocols() {
+    try {
+        // Get Kamino metrics
+        const kaminoMetrics = await protocolService.getKaminoMetrics();
+        
+        if (kaminoMetrics && kaminoMetrics.length > 0) {
+            // Record metrics to InfluxDB
+            for (const metric of kaminoMetrics) {
+                await influxClient.writeMetric(
+                    'protocol_metrics',
+                    {
+                        protocol: 'kamino',
+                        strategy: metric.strategyName || 'unknown',
+                        pair: metric.tokenAPair + '-' + metric.tokenBPair
+                    },
+                    {
+                        tvl: metric.tvl || 0,
+                        apy: metric.apy || 0,
+                        volume24h: metric.volume24h || 0
+                    }
+                );
+            }
+        }
+
+        // AI-enhanced monitoring
+        const protocols = await protocolService.getProtocolHealth();
+        if (protocols.length > 0) {
+            // Get AI insights
+            const aiInsights = await claudeService.analyzeProtocolHealth(protocols);
+            
+            // Record AI insights
+            await influxClient.writeMetric(
+                'ai_insights',
+                { source: 'claude' },
+                {
+                    risk_score: aiInsights.risk_assessment.overall_risk,
+                    recommendations_count: aiInsights.recommendations.length
+                }
+            );
+
+            // Trigger alerts if AI detects high risk
+            if (aiInsights.risk_assessment.overall_risk > 75) {
+                await alertService.triggerAlerts([{
+                    type: 'PROTOCOL',
+                    severity: 'HIGH',
+                    message: `AI Risk Alert: ${aiInsights.insights}`,
+                    timestamp: new Date().toISOString()
+                }], 'system');
+            }
+        }
+
+        // Schedule next monitoring run
+        setTimeout(monitorProtocols, 60000);
+
+    } catch (error) {
+        console.error('Error monitoring protocols:', error);
+        
+        await influxClient.writeMetric(
+            'protocol_errors',
+            { protocol: 'all', type: 'monitoring' },
+            { count: 1 }
+        );
+
+        setTimeout(monitorProtocols, 30000);
+    }
+}

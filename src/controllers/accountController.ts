@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { AccountService } from '../services/accountService';
-import WebSocketManager from '../infrastructure/websocket/wsManager';
+import wsManager, { WebSocketManager } from '../infrastructure/websocket/wsManager';
 import { WebSocketHandlers } from '../infrastructure/websocket/wsHandlers';
 
 export class AccountController {
@@ -9,7 +9,7 @@ export class AccountController {
 
     constructor() {
         this.accountService = new AccountService();
-        this.wsManager = WebSocketManager.getInstance();
+        this.wsManager = wsManager;
     }
 
     async getAccountInfo(req: Request, res: Response): Promise<void> {
@@ -259,6 +259,29 @@ export class AccountController {
             console.error('Subscription error:', error);
             res.status(500).json({
                 error: 'Failed to subscribe to account',
+                details: error instanceof Error ? error.message : String(error)
+            });
+        }
+    }
+
+    async getAccountMetrics(req: Request, res: Response): Promise<void> {
+        try {
+            const { pubkey } = req.params;
+            const timeRange = req.query.timeRange as string || '24h'; // Default to 24 hours
+            
+            // Get metrics from the metrics service
+            const metrics = await this.accountService.getAccountMetrics(pubkey, timeRange);
+            
+            res.json({
+                success: true,
+                pubkey,
+                timeRange,
+                metrics
+            });
+        } catch (error) {
+            console.error('Metrics error:', error);
+            res.status(500).json({
+                error: 'Failed to fetch account metrics',
                 details: error instanceof Error ? error.message : String(error)
             });
         }

@@ -26,7 +26,8 @@ import {
     InflationRateResponse,
     TokenLargestAccountsRequest,
     SupplyRequest,
-    SupplyResponse
+    SupplyResponse,
+    QueryOptions
 } from '../schemas/accountSchema';
 import redisClient from '../infrastructure/cache/redisClient';
 import { MetricsService } from './metricsService';
@@ -239,5 +240,118 @@ export class AccountService {
             }]
         };
         return this.makeRPCRequest<SupplyResponse>(request);
+    }
+
+    async getAccountMetrics(pubkey: string, timeRange: string): Promise<any> {
+        const cacheKey = `metrics:${pubkey}:${timeRange}`;
+        const cached = await this.getCachedData(cacheKey);
+        
+        if (cached) return cached;
+
+        try {
+            // Convert timeRange string to QueryOptions
+            const options: QueryOptions = {
+                start: this.convertTimeRangeToStart(timeRange),
+                stop: new Date().toISOString()
+            };
+
+            // Gather different types of metrics in parallel
+            const [
+                transactionHistory,
+                accountInfo,
+                tokenAccounts,
+                balanceInfo
+            ] = await Promise.all([
+                this.getTransactionHistory(pubkey, 100),  // Get last 100 transactions
+                this.getAccountInfo(pubkey),
+                this.getTokenAccounts(pubkey),
+                this.getBalance(pubkey)
+            ]);
+
+            // Process and structure the metrics
+            const metrics = {
+                transactions: {
+                    total: transactionHistory.result?.length || 0,
+                    recent: transactionHistory.result?.slice(0, 10) || [],  // Last 10 transactions
+                    history: this.processTransactionHistory(transactionHistory.result)
+                },
+                account: {
+                    balance: balanceInfo.result?.value || 0,
+                    owner: accountInfo.result?.value?.owner || null,
+                    executable: accountInfo.result?.value?.executable || false,
+                    rentEpoch: accountInfo.result?.value?.rentEpoch || 0
+                },
+                tokens: {
+                    accounts: tokenAccounts.result?.value?.length || 0,
+                    details: tokenAccounts.result?.value?.map(account => ({
+                        mint: account.account.data.parsed.info.mint,
+                        amount: account.account.data.parsed.info.tokenAmount.amount,
+                        decimals: account.account.data.parsed.info.tokenAmount.decimals,
+                        uiAmount: account.account.data.parsed.info.tokenAmount.uiAmount
+                    })) || []
+                },
+                activity: {
+                    lastActive: transactionHistory.result?.[0]?.blockTime || null,
+                    timeRange: {
+                        start: options.start,
+                        stop: options.stop
+                    }
+                }
+            };
+
+            // Cache the results for 5 minutes
+            await this.setCachedData(cacheKey, {
+                success: true,
+                pubkey,
+                timeRange,
+                metrics
+            }, 300);
+            
+            return {
+                success: true,
+                pubkey,
+                timeRange,
+                metrics
+            };
+
+        } catch (error) {
+            console.error('Error fetching account metrics:', error);
+            return {
+                success: false,
+                pubkey,
+                timeRange,
+                error: error instanceof Error ? error.message : 'Unknown error',
+                metrics: []
+            };
+        }
+    }
+
+    // Helper method to process transaction history
+    private processTransactionHistory(transactions: any[]): any {
+        if (!transactions) return [];
+        
+        return transactions.map(tx => ({
+            signature: tx.signature,
+            blockTime: tx.blockTime,
+            status: tx.err ? 'failed' : 'success',
+            slot: tx.slot
+        }));
+    }
+
+    // Add helper method to convert time range string to start time
+    private convertTimeRangeToStart(timeRange: string): string {
+        const now = new Date();
+        switch (timeRange) {
+            case '1h':
+                return new Date(now.getTime() - 3600000).toISOString();
+            case '24h':
+                return new Date(now.getTime() - 86400000).toISOString();
+            case '7d':
+                return new Date(now.getTime() - 604800000).toISOString();
+            case '30d':
+                return new Date(now.getTime() - 2592000000).toISOString();
+            default:
+                return new Date(now.getTime() - 86400000).toISOString(); // Default to 24h
+        }
     }
 }

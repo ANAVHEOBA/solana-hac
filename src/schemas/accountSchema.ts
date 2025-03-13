@@ -249,3 +249,10 @@ export interface SupplyResponse {
         };
     };
 }
+
+// Query Options for Metrics
+export interface QueryOptions {
+    start: string;
+    stop?: string;
+    limit?: number;
+}

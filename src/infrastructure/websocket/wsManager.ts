@@ -1,7 +1,7 @@
 import WebSocket from 'ws';
 import { Connection, PublicKey } from '@solana/web3.js';
 
-class WebSocketManager {
+export class WebSocketManager {
     private static instance: WebSocketManager;
     private connections: Map<string, WebSocket>;
     private subscriptions: Map<string, number>;

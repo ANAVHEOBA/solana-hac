@@ -31,9 +31,9 @@ export class MetricsService {
 
     async getAccountMetrics(
         pubkey: string,
-        options: QueryOptions = {}
+        options: QueryOptions
     ): Promise<any[]> {
-        const cacheKey = `metrics:account:${pubkey}`;
+        const cacheKey = `metrics:account:${pubkey}:${options.start}`;
         const cached = await redisClient.get(cacheKey);
 
         if (cached) {
@@ -42,9 +42,10 @@ export class MetricsService {
 
         const query = `
             from(bucket: "${influxConfig.bucket}")
-                |> range(start: ${options.start || '-1h'})
+                |> range(start: ${options.start}, stop: ${options.stop || 'now()'})
                 |> filter(fn: (r) => r["pubkey"] == "${pubkey}")
                 |> filter(fn: (r) => r["_measurement"] == "${influxConfig.measurements.accounts}")
+                ${options.limit ? `|> limit(n: ${options.limit})` : ''}
         `;
 
         const results = await influxClient.query(query);
@@ -55,15 +56,43 @@ export class MetricsService {
 
     async getProtocolMetrics(
         protocolName: string,
-        options: QueryOptions = {}
+        options: QueryOptions
     ): Promise<any[]> {
         const query = `
             from(bucket: "${influxConfig.bucket}")
-                |> range(start: ${options.start || '-24h'})
+                |> range(start: ${options.start}, stop: ${options.stop || 'now()'})
                 |> filter(fn: (r) => r["protocol"] == "${protocolName}")
                 |> filter(fn: (r) => r["_measurement"] == "${influxConfig.measurements.protocols}")
+                ${options.limit ? `|> limit(n: ${options.limit})` : ''}
         `;
 
         return await influxClient.query(query);
+    }
+
+    // Add helper methods for common metric queries
+    async getAccountActivity(pubkey: string, timeRange: QueryOptions): Promise<any[]> {
+        return this.getAccountMetrics(pubkey, {
+            ...timeRange,
+            limit: 1000 // Reasonable limit for activity analysis
+        });
+    }
+
+    async getAccountTrends(pubkey: string, timeRange: QueryOptions): Promise<any> {
+        const metrics = await this.getAccountMetrics(pubkey, timeRange);
+        
+        // Calculate basic trends
+        return {
+            metrics,
+            summary: this.calculateMetricsSummary(metrics)
+        };
+    }
+
+    private calculateMetricsSummary(metrics: any[]): any {
+        // Add your summary calculation logic here
+        return {
+            totalTransactions: metrics.length,
+            averageLamports: metrics.reduce((acc, m) => acc + (m.fields?.lamports || 0), 0) / metrics.length,
+            lastUpdated: new Date().toISOString()
+        };
     }
 } 
